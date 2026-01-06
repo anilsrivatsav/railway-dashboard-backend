@@ -1,14 +1,16 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, func
 from typing import List, Dict, Any, Optional
 
 from services.report_service import ReportService
 from database import get_db
+from datetime import date
+import models
 
+router = APIRouter(prefix="/reports", tags=["Reports"])
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/reports", tags=["reports"])
-
 
 @router.get("/station-unit-count", response_model=List[Dict[str, Any]])
 def station_unit_count_report(db: Session = Depends(get_db)):
@@ -429,3 +431,313 @@ def revenue_per_ticket_by_station_report(db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to generate Revenue per Ticket by Station report.",
         )
+
+
+
+
+@router.get("/expiring-units")
+def expiring_units(
+    days: int = Query(90, description="Show units expiring within N days"),
+    db: Session = Depends(get_db)
+):
+    today = date.today()
+    data = []
+
+    units = db.query(models.Unit).all()
+
+    for u in units:
+        if not u.license_fee_valid_upto:
+            continue
+
+        days_left = (u.license_fee_valid_upto - today).days
+
+        if days_left < 0 or days_left > days:
+            continue
+
+        # Risk bucket
+        if days_left <= 10:
+            risk = "CRITICAL"
+        elif days_left <= 15:
+            risk = "VERY_URGENT"
+        elif days_left <= 30:
+            risk = "1_MONTH"
+        elif days_left <= 60:
+            risk = "2_MONTHS"
+        else:
+            risk = "3_MONTHS"
+
+        data.append({
+            "station_code": u.station_code,
+            "station_name": u.station.station_name if u.station else u.station_code,
+            "unit_no": u.unit_no,
+            "unit_type": u.type_of_unit,
+            "licensee_name": u.licensee_name,
+            "license_fee": u.license_fee,
+            "valid_upto": u.license_fee_valid_upto,
+            "days_left": days_left,
+            "risk": risk
+        })
+
+    # Most urgent first
+    data.sort(key=lambda x: x["days_left"])
+
+    return data
+@router.get("/chronic-defaulters")
+def chronic_defaulters(db: Session = Depends(get_db)):
+    from datetime import date
+    data = []
+
+    today = date.today()
+
+    units = db.query(models.Unit).all()
+
+    for u in units:
+        last_payment = (
+            db.query(func.max(models.Earning.date_of_receipt))
+              .filter(models.Earning.unit_no == u.unit_no)
+              .scalar()
+        )
+
+        if not last_payment:
+            overdue_days = (today - u.contract_from).days
+        else:
+            overdue_days = (today - last_payment).days
+
+        if overdue_days > 60:
+            total_paid = (
+                db.query(func.sum(models.Earning.amount))
+                .filter(models.Earning.unit_no == u.unit_no)
+                .scalar() or 0
+            )
+
+            data.append({
+                "station": u.station_code,
+                "unit_no": u.unit_no,
+                "licensee": u.licensee_name,
+                "last_payment": last_payment,
+                "overdue_days": overdue_days,
+                "license_fee": u.license_fee,
+                "total_paid": total_paid
+            })
+
+    data.sort(key=lambda x: x["overdue_days"], reverse=True)
+    return data
+
+@router.get("/expiry-calendar")
+def expiry_calendar(db: Session = Depends(get_db)):
+    data = {}
+
+    units = db.query(models.Unit).all()
+
+    for u in units:
+        if not u.contract_to:
+            continue
+
+        month = u.contract_to.strftime("%Y-%m")
+
+        if month not in data:
+            data[month] = {
+                "month": month,
+                "units": 0,
+                "revenue": 0
+            }
+
+        data[month]["units"] += 1
+        data[month]["revenue"] += u.license_fee or 0
+
+    return sorted(data.values(), key=lambda x: x["month"])
+@router.get("/action-board")
+def action_board(db: Session = Depends(get_db)):
+    from datetime import date
+    today = date.today()
+
+    expiring = []
+    defaulters = []
+    dead_units = []
+    revenue_at_risk = 0
+
+    units = db.query(models.Unit).all()
+
+    for u in units:
+        # Expiry in 30 days
+        if u.license_fee_valid_upto:
+            days_left = (u.license_fee_valid_upto - today).days
+            if 0 <= days_left <= 30:
+                expiring.append({
+                    "station": u.station_code,
+                    "unit": u.unit_no,
+                    "licensee": u.licensee_name,
+                    "days_left": days_left,
+                    "license_fee": u.license_fee
+                })
+                revenue_at_risk += u.license_fee or 0
+
+        # Dead unit
+        if u.unit_status in ("VACANT", "CLOSED"):
+            dead_units.append({
+                "station": u.station_code,
+                "unit": u.unit_no,
+                "license_fee": u.license_fee
+            })
+
+        # Defaulters
+        last_payment = (
+            db.query(func.max(models.Earning.date_of_receipt))
+              .filter(models.Earning.unit_no == u.unit_no)
+              .scalar()
+        )
+        if not last_payment or (today - last_payment).days > 60:
+            defaulters.append({
+                "station": u.station_code,
+                "unit": u.unit_no,
+                "licensee": u.licensee_name,
+                "last_payment": last_payment
+            })
+
+    return {
+        "expiring_units": expiring,
+        "dead_units": dead_units,
+        "defaulters": defaulters,
+        "revenue_at_risk_next_30_days": revenue_at_risk
+    }
+@router.get("/station-utilisation")
+def station_utilisation(db: Session = Depends(get_db)):
+    stations = db.query(models.Station).all()
+    result = []
+
+    for s in stations:
+        total_units = db.query(models.Unit).filter(models.Unit.station_code == s.station_code).count()
+        active_units = db.query(models.Unit).filter(
+            models.Unit.station_code == s.station_code,
+            models.Unit.unit_status == "Operational"
+        ).count()
+
+        utilisation = round((active_units / total_units) * 100, 2) if total_units else 0
+
+        result.append({
+            "station_code": s.station_code,
+            "station_name": s.station_name,
+            "zone": s.zone,
+            "division": s.division,
+            "section": s.section,
+            "cmi": s.cmi,
+            "den": s.den,
+            "sr_den": s.sr_den,
+            "footfall": s.footfall,
+            "total_units": total_units,
+            "active_units": active_units,
+            "utilisation_percent": utilisation
+        })
+
+    return result
+@router.get("/station-performance")
+def station_performance(db: Session = Depends(get_db)):
+    from datetime import date
+    today = date.today()
+    result = []
+
+    stations = db.query(models.Station).all()
+
+    for s in stations:
+        units = db.query(models.Unit).filter(models.Unit.station_code == s.station_code).all()
+
+        expected = sum(u.license_fee or 0 for u in units)
+        collected = (
+            db.query(func.sum(models.Earning.amount))
+            .join(models.Unit, models.Earning.unit_no == models.Unit.unit_no)
+            .filter(models.Unit.station_code == s.station_code)
+            .scalar() or 0
+        )
+
+        vacancy = sum(1 for u in units if u.unit_status != "Operational")
+
+        overdue = 0
+        expiring = 0
+
+        for u in units:
+            last_payment = (
+                db.query(func.max(models.Earning.date_of_receipt))
+                .filter(models.Earning.unit_no == u.unit_no)
+                .scalar()
+            )
+            if not last_payment or (today - last_payment).days > 60:
+                overdue += u.license_fee or 0
+
+            if u.license_fee_valid_upto and (u.license_fee_valid_upto - today).days <= 30:
+                expiring += 1
+
+        collection_percent = round((collected / expected) * 100, 2) if expected else 0
+
+        result.append({
+            "station_code": s.station_code,
+            "station_name": s.station_name,
+            "section": s.section,
+            "cmi": s.cmi,
+            "den": s.den,
+            "sr_den": s.sr_den,
+            "footfall": s.footfall,
+            "collection_percent": collection_percent,
+            "vacant_units": vacancy,
+            "overdue_amount": overdue,
+            "expiring_units_30d": expiring
+        })
+
+    return result
+@router.get("/station-action")
+def station_action(station: str, db: Session = Depends(get_db)):
+    from datetime import date
+    today = date.today()
+
+    s = db.query(models.Station).filter(models.Station.station_code == station).first()
+    if not s:
+        return {"error": "Station not found"}
+
+    units = db.query(models.Unit).filter(models.Unit.station_code == station).all()
+
+    expiring = []
+    defaulters = []
+    dead = []
+
+    for u in units:
+        if u.license_fee_valid_upto and (u.license_fee_valid_upto - today).days <= 30:
+            expiring.append({
+                "unit": u.unit_no,
+                "licensee": u.licensee_name,
+                "days_left": (u.license_fee_valid_upto - today).days,
+                "license_fee": u.license_fee
+            })
+
+        last_payment = (
+            db.query(func.max(models.Earning.date_of_receipt))
+            .filter(models.Earning.unit_no == u.unit_no)
+            .scalar()
+        )
+        if not last_payment or (today - last_payment).days > 60:
+            defaulters.append({
+                "unit": u.unit_no,
+                "licensee": u.licensee_name
+            })
+
+        if u.unit_status != "Operational":
+            dead.append({
+                "unit": u.unit_no,
+                "status": u.unit_status
+            })
+
+    return {
+        "station_details": {
+            "station_code": s.station_code,
+            "station_name": s.station_name,
+            "zone": s.zone,
+            "division": s.division,
+            "section": s.section,
+            "cmi": s.cmi,
+            "den": s.den,
+            "sr_den": s.sr_den,
+            "footfall": s.footfall,
+            "category": s.categorisation
+        },
+        "expiring_units": expiring,
+        "defaulters": defaulters,
+        "dead_units": dead
+    }
