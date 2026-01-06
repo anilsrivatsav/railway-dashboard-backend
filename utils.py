@@ -1,12 +1,13 @@
 import os
 import json
 import logging
+import re
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
-# ─── LOGGING ────────────────────────────────────────────────────────────
+# ─── LOGGING ─────────────────────────────────────────────────────────────
 def setup_logging():
     logging.basicConfig(
         level=logging.INFO,
@@ -15,24 +16,20 @@ def setup_logging():
 
 logger = logging.getLogger("station_units_app")
 
-# ─── GOOGLE SHEET CONFIG ────────────────────────────────────────────────
+# ─── GOOGLE SERVICE ACCOUNT ──────────────────────────────────────────────
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-# Load service account securely from Render / AWS environment
-try:
-    SERVICE_ACCOUNT_INFO = json.loads(
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"]
-    )
-except KeyError:
-    raise RuntimeError("❌ GOOGLE_APPLICATION_CREDENTIALS_JSON not set in environment")
+SERVICE_ACCOUNT_INFO = json.loads(
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"]
+)
 
-# Allowed tabs
 TABS = ["Stations", "Units", "Earnings"]
 
-# ─── GOOGLE SHEET ACCESS ────────────────────────────────────────────────
+# ─── GOOGLE SHEET READER ─────────────────────────────────────────────────
 def get_google_sheet(sheet_id: str, tab_name: str) -> List[Dict[str, Any]]:
     """
-    Fetch all records from a Google Sheet tab using a secure service account.
+    Fetch all rows from a Google Sheet tab safely.
+    Handles duplicate headers automatically.
     """
     if tab_name not in TABS:
         raise ValueError(f"Unknown tab '{tab_name}'. Valid tabs are: {TABS}")
@@ -44,45 +41,93 @@ def get_google_sheet(sheet_id: str, tab_name: str) -> List[Dict[str, Any]]:
 
     try:
         ws = client.open_by_key(sheet_id).worksheet(tab_name)
-        records = ws.get_all_records()
+
+        # Get header row
+        headers = ws.row_values(1)
+
+        # Remove duplicate headers safely
+        clean_headers = []
+        seen = {}
+        for h in headers:
+            h = h.strip()
+            if h in seen:
+                seen[h] += 1
+                clean_headers.append(f"{h}_{seen[h]}")
+            else:
+                seen[h] = 1
+                clean_headers.append(h)
+
+        records = ws.get_all_records(expected_headers=clean_headers)
+
         logger.info(f"📄 Fetched {len(records)} rows from '{tab_name}'")
         return records
 
-    except gspread.exceptions.SpreadsheetNotFound:
-        raise Exception(f"❌ Sheet ID '{sheet_id}' not found or not shared with service account.")
-    except gspread.exceptions.WorksheetNotFound:
-        raise Exception(f"❌ Tab '{tab_name}' not found in sheet.")
     except Exception as e:
+        logger.exception("Google Sheet fetch failed")
         raise Exception(f"❌ Failed to fetch tab '{tab_name}': {e}")
 
-# ─── SAFETY CONVERSIONS ─────────────────────────────────────────────────
-def safe_int(value, default: int = 0) -> int:
+# ─── NUMBER NORMALIZATION (₹, commas, + etc) ──────────────────────────────
+def normalize_number(value):
+    """
+    Converts:
+      ₹1,305,999  → 1305999
+      3,50,000+   → 350000
+      1,23,456    → 123456
+      #N/A        → None
+    """
+    if value is None:
+        return None
+
+    s = str(value).strip()
+
+    if s.lower() in ("", "n/a", "#n/a", "na", "none"):
+        return None
+
+    # Remove currency, commas, plus, spaces
+    s = re.sub(r"[₹,+\s]", "", s)
+
+    # Keep digits and dot only
+    s = re.sub(r"[^\d.]", "", s)
+
+    if s == "":
+        return None
+
+    return s
+
+
+def safe_int(value, default=0) -> int:
     try:
-        return int(value)
-    except (ValueError, TypeError):
+        n = normalize_number(value)
+        if n is None:
+            return default
+        return int(float(n))
+    except:
         return default
 
-def safe_float(value, default: float = 0.0) -> float:
+
+def safe_float(value, default=0.0) -> float:
     try:
-        return float(value)
-    except (ValueError, TypeError):
+        n = normalize_number(value)
+        if n is None:
+            return default
+        return float(n)
+    except:
         return default
 
+# ─── BOOLEAN PARSER ──────────────────────────────────────────────────────
 def parse_bool(value) -> bool:
     s = str(value).strip().lower()
-    return s in ("true", "1", "yes", "y")
+    return s in ("true", "1", "yes", "y", "available", "operational")
 
+# ─── DATE PARSER ─────────────────────────────────────────────────────────
 def parse_date(value) -> Optional[date]:
-    """
-    Try common date formats; return a date or None.
-    """
     if not value:
         return None
 
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
         try:
             return datetime.strptime(str(value), fmt).date()
-        except (ValueError, TypeError):
+        except:
             continue
 
     logger.warning(f"⚠ Could not parse date '{value}'")
