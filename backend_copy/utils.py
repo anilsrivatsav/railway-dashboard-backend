@@ -1,5 +1,3 @@
-import os
-import json
 import logging
 import gspread
 from google.oauth2.service_account import Credentials
@@ -16,40 +14,28 @@ def setup_logging():
 logger = logging.getLogger("station_units_app")
 
 # ─── GOOGLE SHEET CONFIG ────────────────────────────────────────────────
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+SERVICE_ACCOUNT_FILE = 'ambient-tuner-447301-s1-934187a30682.json'
+SHEET_ID = '1JSlf6FOZMlSrb2wiAcb0LTk2BZYDPzvC98gNLfUDR-0'
+TABS = ['Stations', 'Units', 'Earnings']
 
-# Load service account securely from Render / AWS environment
-try:
-    SERVICE_ACCOUNT_INFO = json.loads(
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"]
-    )
-except KeyError:
-    raise RuntimeError("❌ GOOGLE_APPLICATION_CREDENTIALS_JSON not set in environment")
-
-# Allowed tabs
-TABS = ["Stations", "Units", "Earnings"]
-
-# ─── GOOGLE SHEET ACCESS ────────────────────────────────────────────────
 def get_google_sheet(sheet_id: str, tab_name: str) -> List[Dict[str, Any]]:
     """
-    Fetch all records from a Google Sheet tab using a secure service account.
+    Fetch all records from the named tab in our canonical SHEET_ID.
     """
     if tab_name not in TABS:
         raise ValueError(f"Unknown tab '{tab_name}'. Valid tabs are: {TABS}")
 
-    creds = Credentials.from_service_account_info(
-        SERVICE_ACCOUNT_INFO, scopes=SCOPES
+    creds = Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
     client = gspread.authorize(creds)
 
     try:
-        ws = client.open_by_key(sheet_id).worksheet(tab_name)
-        records = ws.get_all_records()
-        logger.info(f"📄 Fetched {len(records)} rows from '{tab_name}'")
-        return records
-
+        ws = client.open_by_key(SHEET_ID).worksheet(tab_name)
+        return ws.get_all_records()
     except gspread.exceptions.SpreadsheetNotFound:
-        raise Exception(f"❌ Sheet ID '{sheet_id}' not found or not shared with service account.")
+        raise Exception(f"❌ Sheet ID '{SHEET_ID}' not found or not shared.")
     except gspread.exceptions.WorksheetNotFound:
         raise Exception(f"❌ Tab '{tab_name}' not found in sheet.")
     except Exception as e:
@@ -70,20 +56,18 @@ def safe_float(value, default: float = 0.0) -> float:
 
 def parse_bool(value) -> bool:
     s = str(value).strip().lower()
-    return s in ("true", "1", "yes", "y")
+    return s in ('true', '1', 'yes')
 
 def parse_date(value) -> Optional[date]:
     """
-    Try common date formats; return a date or None.
+    Try a few common date formats; return a date or None.
     """
     if not value:
         return None
-
     for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
         try:
-            return datetime.strptime(str(value), fmt).date()
+            return datetime.strptime(value, fmt).date()
         except (ValueError, TypeError):
             continue
-
-    logger.warning(f"⚠ Could not parse date '{value}'")
+    logger.warning(f"⚠ could not parse date '{value}'")
     return None
