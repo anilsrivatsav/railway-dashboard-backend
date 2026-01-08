@@ -9,10 +9,9 @@ from utils import get_google_sheet, safe_int, parse_bool
 
 logger = logging.getLogger(__name__)
 
-
 class StationService:
 
-    # ───────────────────────────── CRUD ─────────────────────────────
+    # ───────────────────── CRUD ─────────────────────
 
     @staticmethod
     def get_station(db: Session, station_code: str):
@@ -22,19 +21,12 @@ class StationService:
               .first()
         )
         if not station:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Station not found",
-            )
+            raise HTTPException(status_code=404, detail="Station not found")
         return station
 
     @staticmethod
     def list_stations(db: Session):
-        return (
-            db.query(models.Station)
-              .order_by(models.Station.station_name)
-              .all()
-        )
+        return db.query(models.Station).order_by(models.Station.station_name).all()
 
     @staticmethod
     def create_station(db: Session, station: schemas.StationCreate):
@@ -60,65 +52,74 @@ class StationService:
         db.commit()
         return {"detail": "Station deleted"}
 
-    # ───────────────────────────── GOOGLE SHEET SYNC ─────────────────────────────
+    # ───────────────────── SYNC FROM GOOGLE SHEET ─────────────────────
 
     @staticmethod
     def sync_stations(sheet_id: str, db: Session):
-       """
-       Sync station master from Google Sheets.
-       Correctly reads Passenger Footfall, ranges, platforms and booleans.
-       """
-   
-       logger.info("🔄 Syncing Stations from Google Sheets…")
-   
-       records: List[Dict[str, Any]] = get_google_sheet(sheet_id, "Stations")
-   
-       skipped = 0
-       updated = 0
-   
-       for rec in records:
-           # Normalize headers
-           row = {k.strip().lower(): v for k, v in rec.items()}
-   
-           station_code = row.get("station code")
-           station_name = row.get("station name")
-   
-           if not station_code or not station_name:
-               skipped += 1
-               continue
-   
-           # ─── PLATFORM COUNT ─────────────────────────────
-           raw_platforms = row.get("number of platforms") or row.get("platforms") or ""
-           platform_count = safe_int(raw_platforms)
-   
-           # ─── 🔥 THIS IS THE REAL FOOTFALL ───────────────
-           passenger_footfall = safe_int(row.get("passenger footfall"))
-   
-           station = models.Station(
-               station_code    = station_code.strip(),
-               station_name    = station_name.strip(),
-               division        = row.get("division"),
-               zone            = row.get("zone"),
-               section         = row.get("section"),
-               cmi             = row.get("cmi"),
-               den             = row.get("den"),
-               sr_den          = row.get("sr.den") or row.get("sr den"),
-               categorisation  = row.get("categorisation"),
-               earnings_range  = row.get("earnings range"),
-               passenger_range = row.get("passenger range"),
-   
-               # ✅ FIXED: now reads real number like 73451
-               footfall        = passenger_footfall,
-   
-               platforms       = row.get("platforms"),
-               platform_count  = platform_count,
-               platform_type   = row.get("platform type"),
-               parking         = parse_bool(row.get("parking")),
-               pay_and_use     = parse_bool(row.get("pay & use")),
-           )
-   
-           db.merge(station)
-           updated += 1
-   
-       db.commit()
-       logger.info(f"✅ Stations sync complete. Updated {updated}, Skipped {skipped}")
+        logger.info("🔄 Syncing Stations from Google Sheets…")
+
+        records: List[Dict[str, Any]] = get_google_sheet(sheet_id, "Stations")
+
+        skipped = 0
+        updated = 0
+
+        for rec in records:
+            row = {k.strip().lower(): v for k, v in rec.items()}
+
+            station_code = row.get("station code")
+            station_name = row.get("station name")
+
+            if not station_code or not station_name:
+                skipped += 1
+                continue
+
+            # ─── PLATFORM COUNT ──────────────────────
+            raw_platforms = row.get("platforms") or ""
+            pc = 0
+            nums = re.findall(r"\d+", str(raw_platforms))
+            if nums:
+                pc = max(int(n) for n in nums)
+
+            # ─── 🔥 REAL FOOTFALL FROM GOOGLE ───────────────
+            passenger_footfall = safe_int(row.get("passenger footfall"))
+
+            station = models.Station(
+                station_code = station_code.strip(),
+                station_name = station_name.strip(),
+                division = row.get("division"),
+                zone = row.get("zone"),
+                section = row.get("section"),
+                cmi = row.get("cmi"),
+                den = row.get("den"),
+                sr_den = row.get("sr.den") or row.get("sr den"),
+                categorisation = row.get("categorisation"),
+                earnings_range = row.get("earnings range"),
+                passenger_range = row.get("passenger range"),
+
+                # ✅ THIS IS NOW 73451, NOT 0
+                footfall = passenger_footfall,
+
+                platforms = raw_platforms,
+                platform_count = safe_int(row.get("number of platforms"), pc),
+                platform_type = row.get("platform type"),
+                parking = parse_bool(row.get("parking")),
+                pay_and_use = parse_bool(row.get("pay-and-use") or row.get("pay & use")),
+
+                # 🔥 THESE WERE WRONG BEFORE — NOW FIXED
+                no_of_trains_dealt = safe_int(row.get("no of trains dealt")),
+                tkts_per_day      = safe_int(row.get("tkts per day")),
+                pass_per_day      = safe_int(row.get("pass per day")),
+                earnings_per_day  = safe_int(row.get("earnings per day")),
+                footfalls_per_day = safe_int(row.get("footfalls per day")),
+            )
+
+            # Force overwrite
+            db.query(models.Station).filter(
+                models.Station.station_code == station_code
+            ).delete()
+
+            db.add(station)
+            updated += 1
+
+        db.commit()
+        logger.info(f"✅ Stations synced | Updated: {updated}, Skipped: {skipped}")
