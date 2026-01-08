@@ -64,67 +64,61 @@ class StationService:
 
     @staticmethod
     def sync_stations(sheet_id: str, db: Session):
-        """
-        Sync station master from Google Sheets.
-        This version correctly parses:
-        - platform counts like "1, 2/3"
-        - footfall numbers
-        - categorisation, earnings range, passenger range
-        - booleans like Parking, Pay & Use
-        """
-
-        logger.info("🔄 Syncing Stations from Google Sheets…")
-
-        records: List[Dict[str, Any]] = get_google_sheet(sheet_id, "Stations")
-
-        skipped = 0
-        updated = 0
-
-        for rec in records:
-            row = {k.strip().lower(): v for k, v in rec.items()}
-
-            station_code = row.get("station code") or row.get("station_code")
-            station_name = row.get("station name") or row.get("station_name")
-
-            if not station_code or not station_name:
-                skipped += 1
-                continue
-
-            # ─── PLATFORM COUNT PARSER ─────────────────
-            raw_platforms = row.get("platforms") or ""
-            pc = 0
-            if isinstance(raw_platforms, str):
-                nums = re.findall(r"\d+", raw_platforms)
-                if nums:
-                    pc = max(int(n) for n in nums)
-
-            station = models.Station(
-                station_code    = station_code.strip(),
-                station_name    = station_name.strip(),
-                division        = row.get("division"),
-                zone            = row.get("zone"),
-                section         = row.get("section"),
-                cmi             = row.get("cmi"),
-                den             = row.get("den"),
-                sr_den          = row.get("sr den"),
-                categorisation  = row.get("categorisation"),
-                earnings_range  = row.get("earnings range"),
-                passenger_range = row.get("passenger range"),
-                footfall        = safe_int(row.get("footfall")),
-                platforms       = raw_platforms,
-                platform_count  = pc,
-                platform_type   = row.get("platform type"),
-                parking         = parse_bool(row.get("parking")),
-                pay_and_use     = parse_bool(row.get("pay & use")),
-                no_of_trains_dealt = safe_int(row.get("no of trains")),
-                tkts_per_day    = safe_int(row.get("tickets per day")),
-                pass_per_day    = safe_int(row.get("passengers per day")),
-                earnings_per_day= safe_int(row.get("earnings per day")),
-                footfalls_per_day = safe_int(row.get("footfalls per day")),
-            )
-
-            db.merge(station)
-            updated += 1
-
-        db.commit()
-        logger.info(f"✅ Stations sync complete. Updated: {updated}, Skipped: {skipped}")
+       """
+       Sync station master from Google Sheets.
+       Correctly reads Passenger Footfall, ranges, platforms and booleans.
+       """
+   
+       logger.info("🔄 Syncing Stations from Google Sheets…")
+   
+       records: List[Dict[str, Any]] = get_google_sheet(sheet_id, "Stations")
+   
+       skipped = 0
+       updated = 0
+   
+       for rec in records:
+           # Normalize headers
+           row = {k.strip().lower(): v for k, v in rec.items()}
+   
+           station_code = row.get("station code")
+           station_name = row.get("station name")
+   
+           if not station_code or not station_name:
+               skipped += 1
+               continue
+   
+           # ─── PLATFORM COUNT ─────────────────────────────
+           raw_platforms = row.get("number of platforms") or row.get("platforms") or ""
+           platform_count = safe_int(raw_platforms)
+   
+           # ─── 🔥 THIS IS THE REAL FOOTFALL ───────────────
+           passenger_footfall = safe_int(row.get("passenger footfall"))
+   
+           station = models.Station(
+               station_code    = station_code.strip(),
+               station_name    = station_name.strip(),
+               division        = row.get("division"),
+               zone            = row.get("zone"),
+               section         = row.get("section"),
+               cmi             = row.get("cmi"),
+               den             = row.get("den"),
+               sr_den          = row.get("sr.den") or row.get("sr den"),
+               categorisation  = row.get("categorisation"),
+               earnings_range  = row.get("earnings range"),
+               passenger_range = row.get("passenger range"),
+   
+               # ✅ FIXED: now reads real number like 73451
+               footfall        = passenger_footfall,
+   
+               platforms       = row.get("platforms"),
+               platform_count  = platform_count,
+               platform_type   = row.get("platform type"),
+               parking         = parse_bool(row.get("parking")),
+               pay_and_use     = parse_bool(row.get("pay & use")),
+           )
+   
+           db.merge(station)
+           updated += 1
+   
+       db.commit()
+       logger.info(f"✅ Stations sync complete. Updated {updated}, Skipped {skipped}")
