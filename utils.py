@@ -27,10 +27,6 @@ TABS = ["Stations", "Units", "Earnings"]
 
 # ─── GOOGLE SHEET READER ─────────────────────────────────────────────────
 def get_google_sheet(sheet_id: str, tab_name: str) -> List[Dict[str, Any]]:
-    """
-    Fetch all rows from a Google Sheet tab safely.
-    Handles duplicate headers automatically.
-    """
     if tab_name not in TABS:
         raise ValueError(f"Unknown tab '{tab_name}'. Valid tabs are: {TABS}")
 
@@ -42,10 +38,8 @@ def get_google_sheet(sheet_id: str, tab_name: str) -> List[Dict[str, Any]]:
     try:
         ws = client.open_by_key(sheet_id).worksheet(tab_name)
 
-        # Get header row
         headers = ws.row_values(1)
 
-        # Remove duplicate headers safely
         clean_headers = []
         seen = {}
         for h in headers:
@@ -66,13 +60,14 @@ def get_google_sheet(sheet_id: str, tab_name: str) -> List[Dict[str, Any]]:
         logger.exception("Google Sheet fetch failed")
         raise Exception(f"❌ Failed to fetch tab '{tab_name}': {e}")
 
-# ─── NUMBER NORMALIZATION (₹, commas, + etc) ──────────────────────────────
+# ─── NUMBER NORMALIZATION ────────────────────────────────────────────────
 def normalize_number(value):
     """
     Converts:
       ₹1,305,999  → 1305999
       3,50,000+   → 350000
-      1,23,456    → 123456
+      05to50Lakhs → 50
+      upto01Lakhs → 1
       #N/A        → None
     """
     if value is None:
@@ -82,6 +77,9 @@ def normalize_number(value):
 
     if s.lower() in ("", "n/a", "#n/a", "na", "none"):
         return None
+
+    # Remove words (Lakhs, upto, etc)
+    s = re.sub(r"[a-zA-Z]", "", s)
 
     # Remove currency, commas, plus, spaces
     s = re.sub(r"[₹,+\s]", "", s)
@@ -116,19 +114,25 @@ def safe_float(value, default=0.0) -> float:
 
 # ─── BOOLEAN PARSER ──────────────────────────────────────────────────────
 def parse_bool(value) -> bool:
+    if value is None:
+        return False
     s = str(value).strip().lower()
     return s in ("true", "1", "yes", "y", "available", "operational")
 
 # ─── DATE PARSER ─────────────────────────────────────────────────────────
 def parse_date(value) -> Optional[date]:
-    if not value:
+    if value is None:
+        return None
+
+    s = str(value).strip()
+    if s.lower() in ("", "n/a", "#n/a", "na"):
         return None
 
     for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
         try:
-            return datetime.strptime(str(value), fmt).date()
+            return datetime.strptime(s, fmt).date()
         except:
-            continue
+            pass
 
     logger.warning(f"⚠ Could not parse date '{value}'")
     return None
