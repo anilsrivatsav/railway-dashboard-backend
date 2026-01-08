@@ -7,7 +7,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
-# ─── LOGGING ─────────────────────────────────────────────────────────────
+# ─── LOGGING ─────────────────────────────────────────────
 def setup_logging():
     logging.basicConfig(
         level=logging.INFO,
@@ -35,56 +35,68 @@ def get_google_sheet(sheet_id: str, tab_name: str) -> List[Dict[str, Any]]:
     )
     client = gspread.authorize(creds)
 
-    try:
-        ws = client.open_by_key(sheet_id).worksheet(tab_name)
+    ws = client.open_by_key(sheet_id).worksheet(tab_name)
 
-        headers = ws.row_values(1)
+    headers = ws.row_values(1)
 
-        clean_headers = []
-        seen = {}
-        for h in headers:
-            h = h.strip()
-            if h in seen:
-                seen[h] += 1
-                clean_headers.append(f"{h}_{seen[h]}")
-            else:
-                seen[h] = 1
-                clean_headers.append(h)
+    clean_headers = []
+    seen = {}
+    for h in headers:
+        h = h.strip()
+        if h in seen:
+            seen[h] += 1
+            clean_headers.append(f"{h}_{seen[h]}")
+        else:
+            seen[h] = 1
+            clean_headers.append(h)
 
-        records = ws.get_all_records(expected_headers=clean_headers)
+    records = ws.get_all_records(expected_headers=clean_headers)
 
-        logger.info(f"📄 Fetched {len(records)} rows from '{tab_name}'")
-        return records
+    logger.info(f"📄 Fetched {len(records)} rows from '{tab_name}'")
+    return records
 
-    except Exception as e:
-        logger.exception("Google Sheet fetch failed")
-        raise Exception(f"❌ Failed to fetch tab '{tab_name}': {e}")
 
-# ─── NUMBER NORMALIZATION ────────────────────────────────────────────────
+# ─── NUMBER NORMALIZER (INDIAN RAILWAYS SAFE) ─────────────────────────────
 def normalize_number(value):
     """
-    Converts:
-      ₹1,305,999  → 1305999
-      3,50,000+   → 350000
+    Handles:
+      73451 → 73451
+      1,23,456 → 123456
+      ₹5,40,000 → 540000
+      3,50,000+ → 350000
       05to50Lakhs → 50
       upto01Lakhs → 1
-      #N/A        → None
+      #N/A → None
     """
+
     if value is None:
         return None
+
+    # If Google sends number type
+    if isinstance(value, (int, float)):
+        return str(value)
 
     s = str(value).strip()
 
     if s.lower() in ("", "n/a", "#n/a", "na", "none"):
         return None
 
-    # Remove words (Lakhs, upto, etc)
-    s = re.sub(r"[a-zA-Z]", "", s)
+    # Handle ranges like "05to50Lakhs" → take last number
+    if "to" in s.lower():
+        nums = re.findall(r"\d+", s)
+        if nums:
+            return nums[-1]
 
-    # Remove currency, commas, plus, spaces
+    # Handle "upto01Lakhs"
+    if "upto" in s.lower():
+        nums = re.findall(r"\d+", s)
+        if nums:
+            return nums[-1]
+
+    # Remove currency symbols and commas
     s = re.sub(r"[₹,+\s]", "", s)
 
-    # Keep digits and dot only
+    # Remove everything except digits and dot
     s = re.sub(r"[^\d.]", "", s)
 
     if s == "":
@@ -112,14 +124,16 @@ def safe_float(value, default=0.0) -> float:
     except:
         return default
 
-# ─── BOOLEAN PARSER ──────────────────────────────────────────────────────
+
+# ─── BOOLEAN PARSER ─────────────────────────────────────────────
 def parse_bool(value) -> bool:
     if value is None:
         return False
     s = str(value).strip().lower()
     return s in ("true", "1", "yes", "y", "available", "operational")
 
-# ─── DATE PARSER ─────────────────────────────────────────────────────────
+
+# ─── DATE PARSER ─────────────────────────────────────────────
 def parse_date(value) -> Optional[date]:
     if value is None:
         return None

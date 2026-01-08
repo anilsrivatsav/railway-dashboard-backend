@@ -9,19 +9,23 @@ from utils import get_google_sheet, safe_int, parse_bool
 
 logger = logging.getLogger(__name__)
 
+
 class StationService:
 
-    # ───────────────────── CRUD ─────────────────────
+    # ───────────────────────── CRUD ─────────────────────────
 
     @staticmethod
     def get_station(db: Session, station_code: str):
         station = (
             db.query(models.Station)
-              .filter(models.Station.station_code == station_code)
-              .first()
+            .filter(models.Station.station_code == station_code)
+            .first()
         )
         if not station:
-            raise HTTPException(status_code=404, detail="Station not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Station not found",
+            )
         return station
 
     @staticmethod
@@ -52,7 +56,7 @@ class StationService:
         db.commit()
         return {"detail": "Station deleted"}
 
-    # ───────────────────── SYNC FROM GOOGLE SHEET ─────────────────────
+    # ─────────────────────── GOOGLE SHEET SYNC ───────────────────────
 
     @staticmethod
     def sync_stations(sheet_id: str, db: Session):
@@ -73,52 +77,48 @@ class StationService:
                 skipped += 1
                 continue
 
-            # ─── PLATFORM COUNT ──────────────────────
-            raw_platforms = row.get("platforms") or ""
-            pc = 0
-            nums = re.findall(r"\d+", str(raw_platforms))
-            if nums:
-                pc = max(int(n) for n in nums)
-
-            # ─── 🔥 REAL FOOTFALL FROM GOOGLE ───────────────
+            # 🔥 REAL PASSENGER FOOTFALL
             passenger_footfall = safe_int(row.get("passenger footfall"))
 
+            # PLATFORM COUNT (handles: "1, 2", "1/2", "1, 2/3")
+            raw_platforms = row.get("platforms") or ""
+            platform_count = 0
+            if isinstance(raw_platforms, str):
+                nums = re.findall(r"\d+", raw_platforms)
+                if nums:
+                    platform_count = max(int(n) for n in nums)
+
             station = models.Station(
-                station_code = station_code.strip(),
-                station_name = station_name.strip(),
-                division = row.get("division"),
-                zone = row.get("zone"),
-                section = row.get("section"),
-                cmi = row.get("cmi"),
-                den = row.get("den"),
-                sr_den = row.get("sr.den") or row.get("sr den"),
-                categorisation = row.get("categorisation"),
-                earnings_range = row.get("earnings range"),
-                passenger_range = row.get("passenger range"),
+                station_code=station_code.strip(),
+                station_name=station_name.strip(),
+                division=row.get("division"),
+                zone=row.get("zone"),
+                section=row.get("section"),
+                cmi=row.get("cmi"),
+                den=row.get("den"),
+                sr_den=row.get("sr.den") or row.get("sr den"),
+                categorisation=row.get("categorisation"),
+                earnings_range=row.get("earnings range"),
+                passenger_range=row.get("passenger range"),
 
-                # ✅ THIS IS NOW 73451, NOT 0
-                footfall = passenger_footfall,
+                # ✅ REAL DATA
+                footfall=passenger_footfall,
 
-                platforms = raw_platforms,
-                platform_count = safe_int(row.get("number of platforms"), pc),
-                platform_type = row.get("platform type"),
-                parking = parse_bool(row.get("parking")),
-                pay_and_use = parse_bool(row.get("pay-and-use") or row.get("pay & use")),
+                platforms=raw_platforms,
+                platform_count=platform_count,
+                platform_type=row.get("platform type"),
 
-                # 🔥 THESE WERE WRONG BEFORE — NOW FIXED
-                no_of_trains_dealt = safe_int(row.get("no of trains dealt")),
-                tkts_per_day      = safe_int(row.get("tkts per day")),
-                pass_per_day      = safe_int(row.get("pass per day")),
-                earnings_per_day  = safe_int(row.get("earnings per day")),
-                footfalls_per_day = safe_int(row.get("footfalls per day")),
+                parking=parse_bool(row.get("parking")),
+                pay_and_use=parse_bool(row.get("pay-and-use") or row.get("pay & use")),
+
+                no_of_trains_dealt=safe_int(row.get("no of trains dealt")),
+                tkts_per_day=safe_int(row.get("tkts per day")),
+                pass_per_day=safe_int(row.get("pass per day")),
+                earnings_per_day=safe_int(row.get("earnings per day")),
+                footfalls_per_day=safe_int(row.get("footfalls per day")),
             )
 
-            # Force overwrite
-            db.query(models.Station).filter(
-                models.Station.station_code == station_code
-            ).delete()
-
-            db.add(station)
+            db.merge(station)
             updated += 1
 
         db.commit()
