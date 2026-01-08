@@ -1,5 +1,6 @@
 # services/unit_service.py
 
+import re
 import logging
 from typing import Any, Dict, List
 from fastapi import HTTPException, status
@@ -11,19 +12,16 @@ from utils import get_google_sheet, parse_date, safe_float
 
 logger = logging.getLogger(__name__)
 
+
 class UnitService:
+
+    # ───────────────── CRUD ─────────────────
+
     @staticmethod
     def get_unit(db: Session, unit_no: str):
-        unit = (
-            db.query(models.Unit)
-              .filter(models.Unit.unit_no == unit_no)
-              .first()
-        )
+        unit = db.query(models.Unit).filter(models.Unit.unit_no == unit_no).first()
         if not unit:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Unit not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unit not found")
         return unit
 
     @staticmethod
@@ -54,92 +52,87 @@ class UnitService:
         db.commit()
         return {"detail": "Unit deleted"}
 
+    # ───────────── Google Sheet Sync ─────────────
+
     @staticmethod
     def sync_units(sheet_id: str, db: Session):
-        """
-        Pull the 'Units' tab (using the passed sheet_id if you ever extend get_google_sheet),
-        skip rows missing UNIT NO., upsert the rest.
-        """
-        logger.info(f"🔄 Syncing Units from sheet {sheet_id}…")
-        records: List[Dict[str, Any]] = get_google_sheet(sheet_id, 'Units')
+        logger.info("🔄 Syncing Units from Google Sheets")
+
+        records: List[Dict[str, Any]] = get_google_sheet(sheet_id, "Units")
         skipped = 0
 
-
         for rec in records:
-            unit_no = rec.get('UNIT NO.') or rec.get('unit_no')
+            row = {k.strip().lower(): v for k, v in rec.items()}
+
+            unit_no = row.get("unit no.") or row.get("unit_no")
             if not unit_no:
                 skipped += 1
-                logger.warning(f"Skipping unit record with missing UNIT NO.: {rec}")
                 continue
 
-            db_unit = models.Unit(
-                unit_no            = unit_no,
-                type_of_unit       = rec.get('TYPE OF UNIT'),
-                station_code       = rec.get('STATION'),
-                station_category   = rec.get('STATION CATEGORY'),
-                pegged_location    = rec.get('PEGGED LOCATION'),
-                reservation_cat    = rec.get('RESERVATION CATEGORY'),
-                type_of_allotment  = rec.get('TYPE OF ALLOTMENT'),
-                licensee_name      = rec.get('NAME OF LICENSEE'),
-                license_fee        = safe_float(rec.get('LICENSE FEE')),
-                contract_from      = parse_date(rec.get('CONTRACT from')),
-                contract_to        = parse_date(rec.get('CONTRACT to')),
-                license_paid_upto  = parse_date(rec.get('LICENSE PAID UPTO')),
-                unit_status        = rec.get('UNIT STATUS'),
+            # Extract station code from "BLRR - Belandur Road"
+            raw_station = row.get("station") or ""
+            station_code = None
+            if isinstance(raw_station, str):
+                m = re.match(r"([A-Z]{2,5})", raw_station.strip())
+                if m:
+                    station_code = m.group(1)
+
+            unit = models.Unit(
+                unit_no           = unit_no.strip(),
+                type_of_unit      = row.get("type of unit"),
+                station_code      = station_code,
+                station_category  = row.get("station category"),
+                pf_no             = row.get("pf no"),
+                pegged_location   = row.get("pegged location"),
+                reservation_cat   = row.get("reservation category"),
+                type_of_allotment = row.get("type of allotment"),
+                licensee_name     = row.get("name of licensee"),
+                license_fee       = safe_float(row.get("license fee")),
+                contract_from     = parse_date(row.get("contract from")),
+                contract_to       = parse_date(row.get("contract to")),
+                license_paid_upto = parse_date(row.get("license paid upto")),
+                unit_status       = row.get("unit status"),
             )
-            db.merge(db_unit)
+
+            db.merge(unit)
 
         db.commit()
-        logger.info(f"✅ Units sync complete. Skipped {skipped} records.")
+        logger.info(f"✅ Units synced. Skipped {skipped} records.")
 
-    # ─── Analytics / Reports ────────────────────────────────────────────────
+    # ───────────── Analytics ─────────────
 
     @staticmethod
     def units_unpaid_today(db: Session):
-        """All units whose paid-up-to date is before today."""
         today = date.today()
-        return (
-            db.query(models.Unit)
-              .filter(models.Unit.license_paid_upto < today)
-              .order_by(models.Unit.license_paid_upto)
-              .all()
-        )
+        return db.query(models.Unit)\
+            .filter(models.Unit.license_paid_upto < today)\
+            .order_by(models.Unit.license_paid_upto)\
+            .all()
 
     @staticmethod
     def units_unpaid_this_month(db: Session):
-        """Units whose license_paid_upto < last day of current month."""
         today = date.today()
         next_month = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
         last_day = next_month - timedelta(days=1)
-        return (
-            db.query(models.Unit)
-              .filter(models.Unit.license_paid_upto < last_day)
-              .order_by(models.Unit.license_paid_upto)
-              .all()
-        )
+        return db.query(models.Unit)\
+            .filter(models.Unit.license_paid_upto < last_day)\
+            .order_by(models.Unit.license_paid_upto)\
+            .all()
 
     @staticmethod
     def units_unpaid_this_year(db: Session):
-        """Units whose license_paid_upto < Dec 31 of current year."""
         today = date.today()
         end_year = date(today.year, 12, 31)
-        return (
-            db.query(models.Unit)
-              .filter(models.Unit.license_paid_upto < end_year)
-              .order_by(models.Unit.license_paid_upto)
-              .all()
-        )
+        return db.query(models.Unit)\
+            .filter(models.Unit.license_paid_upto < end_year)\
+            .order_by(models.Unit.license_paid_upto)\
+            .all()
 
     @staticmethod
     def units_due_soon(db: Session, days_ahead: int = 30):
-        """
-        Units whose license_paid_upto is within the next `days_ahead` days.
-        """
         today = date.today()
         cutoff = today + timedelta(days=days_ahead)
-        return (
-            db.query(models.Unit)
-              .filter(models.Unit.license_paid_upto.between(today, cutoff))
-              .order_by(models.Unit.license_paid_upto)
-              .all()
-        )
+        return db.query(models.Unit)\
+            .filter(models.Unit.license_paid_upto.between(today, cutoff))\
+            .order_by(models.Unit.license_paid_upto)\
+            .all()

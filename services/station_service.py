@@ -57,66 +57,79 @@ class StationService:
     @staticmethod
     
     def sync_stations(sheet_id: str, db: Session):
-        """
-        Pull the 'Stations' tab, skip rows missing Station Code or Station Name, upsert the rest.
-        """
-        logger.info("🔄 Syncing Stations…")
-        records: List[Dict[str, Any]] = get_google_sheet(sheet_id, 'Stations')
-        logger.info(f"Fetched {len(records)} records from sheet")
-    
-        skipped = 0
-    
-        for rec in records:
-            row = {k.strip().lower(): v for k, v in rec.items()}
-    
-            station_code = row.get('station code') or row.get('station_code')
-            station_name = row.get('station name') or row.get('station_name')
-    
-            if not station_code or not station_name:
-                skipped += 1
-                logger.warning(f"Skipping record missing code or name: {row}")
-                continue
-    
-            raw_pc = row.get('number of platforms') or row.get('platforms') or '0'
-            pc = 0
-            if isinstance(raw_pc, str):
-                m = re.search(r'(\d+)$', raw_pc)
-                if m:
-                    try:
-                        pc = int(m.group(1))
-                    except ValueError:
-                        logger.warning(f"Could not parse platforms '{raw_pc}', defaulting to 0")
-                else:
-                    logger.warning(f"No digits in platforms '{raw_pc}', defaulting to 0")
-            else:
-                try:
-                    pc = int(raw_pc)
-                except Exception:
-                    logger.warning(f"Unexpected type for platforms '{raw_pc}', defaulting to 0")
-    
-            station = models.Station(
-                station_code    = station_code.strip(),
-                station_name    = station_name.strip(),
-                division        = row.get('division'),
-                zone            = row.get('zone'),
-                section         = row.get('section'),
-                cmi             = row.get('cmi'),
-                den             = row.get('den'),
-                sr_den          = row.get('sr den'),
-                categorisation  = row.get('categorisation'),
-                earnings_range  = row.get('earnings range'),
-                passenger_range = row.get('passenger range'),
-                footfall        = safe_float(row.get('footfall')),
-                platforms       = row.get('platforms'),
-                platform_count  = pc,
-                platform_type   = row.get('platform type'),
-                parking         = parse_bool(row.get('parking')),
-                pay_and_use     = parse_bool(row.get('pay & use')),
-            )
-    
-            db.merge(station)
-    
-        db.commit()
-        logger.info(f"✅ Stations sync complete. Skipped {skipped} records.")
-    
-   
+     """
+     Pulls the 'Stations' tab from Google Sheets and upserts into DB.
+     Designed specifically for Indian Railways commercial data.
+     """
+     logger.info("🔄 Syncing Stations from Google Sheets...")
+  
+     records: List[Dict[str, Any]] = get_google_sheet(sheet_id, "Stations")
+     logger.info(f"📄 Fetched {len(records)} rows")
+  
+     skipped = 0
+     updated = 0
+  
+     for rec in records:
+         # Normalize column headers
+         row = {k.strip().lower(): v for k, v in rec.items()}
+  
+         station_code = row.get("station code") or row.get("station_code")
+         station_name = row.get("station name") or row.get("station_name")
+  
+         if not station_code or not station_name:
+             skipped += 1
+             logger.warning(f"Skipping invalid row: {row}")
+             continue
+  
+         # --------------------------
+         # PLATFORM COUNT PARSING
+         # --------------------------
+         raw_platforms = row.get("platforms") or row.get("number of platforms") or ""
+         pc = 0
+  
+         if isinstance(raw_platforms, str):
+             matches = re.findall(r"\d+", raw_platforms)
+             if matches:
+                 try:
+                     pc = max(int(x) for x in matches)   # "1, 2/3" → 3
+                 except:
+                     pc = 0
+         else:
+             try:
+                 pc = int(raw_platforms)
+             except:
+                 pc = 0
+  
+         station = models.Station(
+             station_code    = station_code.strip(),
+             station_name    = station_name.strip(),
+  
+             division        = row.get("division"),
+             zone            = row.get("zone"),
+             section         = row.get("section"),
+             cmi             = row.get("cmi"),
+             den             = row.get("den"),
+             sr_den          = row.get("sr den"),
+  
+             categorisation  = row.get("categorisation"),
+  
+             # These are NOT numeric – keep them as business classes
+             earnings_range  = row.get("earnings range"),
+             passenger_range = row.get("passenger range"),
+  
+             # Physical infra
+             platforms       = raw_platforms,
+             platform_count  = pc,
+             platform_type   = row.get("platform type"),
+  
+             # Facilities
+             parking         = parse_bool(row.get("parking")),
+             pay_and_use     = parse_bool(row.get("pay & use")),
+         )
+  
+         db.merge(station)
+         updated += 1
+  
+     db.commit()
+  
+     logger.info(f"✅ Station Sync Complete | Updated: {updated}, Skipped: {skipped}")
